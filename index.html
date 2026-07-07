@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Play Store Discovery Scraper</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: #0f1115;
+    color: #e6e6e6;
+    margin: 0;
+    padding: 16px;
+  }
+  h1 { font-size: 20px; margin-bottom: 4px; }
+  p.sub { color: #9aa0a6; font-size: 13px; margin-top: 0; margin-bottom: 20px; }
+  label { display: block; margin-top: 14px; font-size: 13px; color: #c7c7c7; }
+  input, select {
+    width: 100%;
+    padding: 10px;
+    margin-top: 4px;
+    border-radius: 8px;
+    border: 1px solid #2a2d35;
+    background: #1a1d24;
+    color: #fff;
+    font-size: 15px;
+  }
+  button {
+    margin-top: 20px;
+    width: 100%;
+    padding: 14px;
+    border-radius: 8px;
+    border: none;
+    background: #4f8cff;
+    color: #fff;
+    font-size: 16px;
+    font-weight: 600;
+  }
+  button:disabled { background: #3a3f4b; }
+  #status {
+    margin-top: 16px;
+    font-size: 14px;
+    color: #9aa0a6;
+    white-space: pre-line;
+  }
+  #results { margin-top: 20px; }
+  .row {
+    border: 1px solid #2a2d35;
+    border-radius: 8px;
+    padding: 10px;
+    margin-bottom: 8px;
+    font-size: 13px;
+  }
+  .row b { color: #fff; }
+  .muted { color: #9aa0a6; }
+  a.dl {
+    display: inline-block;
+    margin-top: 14px;
+    color: #4f8cff;
+    text-decoration: none;
+    font-size: 14px;
+  }
+</style>
+</head>
+<body>
+  <h1>Play Store Discovery Scraper</h1>
+  <p class="sub">Search by keyword or category, narrow down by country, download range, and release year. Extracts developer email/phone from each listing's "About the developer" info.</p>
+
+  <label>Keyword or category</label>
+  <input id="keyword" placeholder="e.g. waec apps, vtu apps, fashion apps" />
+
+  <label>Filter country (matched against developer address / phone code)</label>
+  <input id="country" placeholder="e.g. Nigeria" />
+
+  <label>State / region (optional, matched against developer address text)</label>
+  <input id="state" placeholder="e.g. Lagos" />
+
+  <label>Play Store storefront country (affects what search results Play returns)</label>
+  <select id="countryCode">
+    <option value="us">United States</option>
+    <option value="ng">Nigeria</option>
+    <option value="gb">United Kingdom</option>
+    <option value="in">India</option>
+    <option value="ke">Kenya</option>
+    <option value="gh">Ghana</option>
+    <option value="za">South Africa</option>
+  </select>
+
+  <label>Download range</label>
+  <select id="downloadBucket">
+    <option value="">Any</option>
+    <option value="100K-1M">100K - 1M</option>
+    <option value="50K-100K">50K - 100K</option>
+    <option value="10K-50K">10K - 50K</option>
+    <option value="1K-10K">1K - 10K</option>
+    <option value="less than 1K">Less than 1K</option>
+  </select>
+
+  <label>Release year from</label>
+  <input id="yearFrom" type="number" placeholder="e.g. 2020" />
+
+  <label>Release year to</label>
+  <input id="yearTo" type="number" placeholder="e.g. 2026" />
+
+  <button id="startBtn">Start Scrape</button>
+
+  <div id="status"></div>
+  <div id="results"></div>
+
+  <script>
+    const startBtn = document.getElementById("startBtn");
+    const statusEl = document.getElementById("status");
+    const resultsEl = document.getElementById("results");
+    let pollTimer = null;
+
+    startBtn.addEventListener("click", async () => {
+      const keyword = document.getElementById("keyword").value.trim();
+      if (!keyword) { alert("Enter a keyword or category first."); return; }
+
+      const body = {
+        keyword,
+        country: document.getElementById("country").value.trim(),
+        state: document.getElementById("state").value.trim(),
+        countryCode: document.getElementById("countryCode").value,
+        downloadBucket: document.getElementById("downloadBucket").value,
+        yearFrom: document.getElementById("yearFrom").value,
+        yearTo: document.getElementById("yearTo").value,
+      };
+
+      startBtn.disabled = true;
+      resultsEl.innerHTML = "";
+      statusEl.textContent = "Starting job...";
+
+      try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 15000);
+
+        const res = await fetch("/api/scrape", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+          signal: controller.signal,
+        });
+        clearTimeout(timeout);
+
+        const data = await res.json();
+        if (!res.ok) {
+          statusEl.textContent = "Error: " + (data.error || "unknown");
+          startBtn.disabled = false;
+          return;
+        }
+
+        statusEl.textContent = "Job started (" + data.jobId + "). Waiting for progress...";
+        pollTimer = setInterval(() => pollJob(data.jobId), 2000);
+      } catch (err) {
+        startBtn.disabled = false;
+        if (err.name === "AbortError") {
+          statusEl.textContent =
+            "Request timed out after 15s - the server likely isn't responding. Check Railway deploy logs.";
+        } else {
+          statusEl.textContent = "Request failed: " + err.message;
+        }
+      }
+    });
+
+    async function pollJob(jobId) {
+      const res = await fetch(`/api/jobs/${jobId}`);
+      const data = await res.json();
+
+      statusEl.textContent =
+        `Status: ${data.status}\n` +
+        `Discovered: ${data.progress.discovered}\n` +
+        `Enriched: ${data.progress.enriched} / ${data.progress.total}`;
+
+      if (data.status === "done") {
+        clearInterval(pollTimer);
+        startBtn.disabled = false;
+        loadResults(jobId, data.resultCount);
+      } else if (data.status === "error") {
+        clearInterval(pollTimer);
+        startBtn.disabled = false;
+        statusEl.textContent += "\nError: " + data.error;
+      }
+    }
+
+    async function loadResults(jobId, count) {
+      const res = await fetch(`/api/jobs/${jobId}/results`);
+      const data = await res.json();
+
+      resultsEl.innerHTML =
+        `<a class="dl" href="/api/jobs/${jobId}/csv">Download CSV (${count} results)</a>`;
+
+      for (const app of data.results.slice(0, 50)) {
+        const div = document.createElement("div");
+        div.className = "row";
+        div.innerHTML = `
+          <b>${app.title || app.appId}</b><br/>
+          <span class="muted">${app.developer || "-"} · ${app.category || "-"} · ${app.downloadBucket || "-"} · ${app.releaseYear || "-"}</span><br/>
+          Emails: ${(app.emails || []).join(", ") || "-"}<br/>
+          Phones: ${(app.phones || []).join(", ") || "-"}
+        `;
+        resultsEl.appendChild(div);
+      }
+      if (data.results.length > 50) {
+        const note = document.createElement("p");
+        note.className = "muted";
+        note.textContent = `Showing first 50 of ${data.results.length}. Download the CSV for the full list.`;
+        resultsEl.appendChild(note);
+      }
+    }
+  </script>
+</body>
+</html>
